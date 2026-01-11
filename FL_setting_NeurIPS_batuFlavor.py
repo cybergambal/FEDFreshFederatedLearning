@@ -1,14 +1,16 @@
 import random
+from typing import List
 import numpy as np
 import torch
 import torch.nn.functional as F
 from collections import deque
 import time
+import heapq
 class FederatedLearning:
     def __init__(self, mode, num_users, device, 
                     cos_similarity, model, TrainSetUsers, epochs, optimizer, criteron, fraction, 
                     testloader, learning_rate_server, train_mode, keepProbAvail, keepProbNotAvail, 
-                    bufferLimit, theta_inner, unit_gradients, adam, temp):
+                    bufferLimit, theta_inner, unit_gradients, adam, temp, cos_similarity_type):
         
         #Arguements
         self.learning_rate_server = learning_rate_server
@@ -73,6 +75,11 @@ class FederatedLearning:
         self.expected_gradient_magnitude = np.zeros((self.num_users, 1))
         self.num_send = 0
 
+        #Cosine similarity variables
+        self.lastGradient = [torch.zeros_like(param).to(self.device) for param in self.w_global]
+        self.lastGradient = torch.cat([g.view(-1) for g in self.lastGradient]).t()
+        self.cosine_similarity_type = cos_similarity_type
+
         # Adam parameters
         if self.adam: 
             self.beta1 = 0.9
@@ -104,7 +111,27 @@ class FederatedLearning:
         denominator = norm_x * norm_y + 1e-12  # avoid division by zero
 
         return (numerator / denominator).item()
+    
+    def cosine_similarity_policy(self) -> List[int]:
 
+        """ Select user with highest cosine similarity to last gradient """
+
+        valList = []
+        userList = []
+
+        for user in self.intermittentUsers:
+            user_grad_vector = torch.cat([g.view(-1) for g in self.sparse_gradient[user]]).to(self.device)
+            cos_sim = self.lp_cosine_similarity(user_grad_vector, self.lastGradient, p = self.cos_similarity)
+            valList.append(cos_sim)
+            userList.append(user)
+            print(f"Cosine Similarity for user {user}: {cos_sim}")
+        
+        chosen_list = heapq.nlargest(self.bufferLimit, zip(valList, userList), key=lambda x: x[0]) if self.cosine_similarity_type else heapq.nsmallest(self.bufferLimit, zip(valList, userList), key=lambda x: x[0])
+
+        chosen_list = [user for val, user in chosen_list]
+
+        return chosen_list
+    
     def calculate_policy(self):
         pi = np.zeros((self.num_users))
         r = np.zeros((self.num_users)) 
@@ -282,7 +309,7 @@ class FederatedLearning:
         self.sum_terms = [torch.zeros_like(param).to(self.device) for param in self.w_global]
         for user in self.selected_users_UL:
             self.UserAgeUL[user] = 0
-            self.contribution[user] += 1/tempUserAgeDL[user].cpu().item()
+            self.contribution[user] += np.sqrt(sum([torch.sum((g/tempUserAgeDL[user].item())**2).item() for g in self.sparse_gradient[user]]))
             temp_gradient = [sg.to(self.device) for sg in self.sparse_gradient[user]]
             self.expected_gradient_magnitude[user] += np.sqrt(sum([torch.sum(g**2).item() for g in temp_gradient]))
             self.sum_terms = [self.sum_terms[j] + temp_gradient[j]/(tempUserAgeDL[user]) for j in range(len(self.sum_terms))] 
@@ -292,10 +319,16 @@ class FederatedLearning:
             self.adamMomentum = [self.beta1 * m + (1 - self.beta1) * (s / len(self.selected_users_UL)) for m, s in zip(self.adamMomentum, self.sum_terms)]
             self.adamVariance = [self.beta2 * v + (1 - self.beta2) * ((s / len(self.selected_users_UL)) ** 2) for v, s in zip(self.adamVariance, self.sum_terms)]
 
+            self.lastGradient = [ self.learning_rate_server * self.adamMomentum[j] / (torch.sqrt(self.adamVariance[j]) + self.tau) for j in range(len(self.sum_terms))]
+            
+            self.lastGradient = torch.cat([g.view(-1) for g in self.lastGradient]).t()
+            
             # Update global model
             self.w_global = [self.w_global[j] + self.learning_rate_server * self.adamMomentum[j] / (torch.sqrt(self.adamVariance[j]) + self.tau) for j in range(len(self.sum_terms))] 
         else:
-
+            self.lastGradient = [s / len(self.selected_users_UL) for s in self.sum_terms]
+            self.lastGradient = torch.cat([g.view(-1) for g in self.lastGradient]).t()
+            
             # Update global model
             self.w_global = [self.w_global[j] + self.learning_rate_server * self.sum_terms[j]/len(self.selected_users_UL) for j in range(len(self.sum_terms))] 
         
@@ -354,7 +387,7 @@ class FederatedLearning:
         print(f"User Age DL: {tempUserAgeDL.squeeze()}")
 
         # Calculate age difference and select top-k users
-        age_diff = (tempUserAgeUL - tempUserAgeDL).squeeze()
+        age_diff = (tempUserAgeUL).squeeze()
         k = min(int(self.bufferLimit), len(self.intermittentUsers))        
         sorted_indices = torch.atleast_1d(torch.argsort(age_diff, descending=True))
         topk_indices = sorted_indices[:k]
@@ -364,6 +397,40 @@ class FederatedLearning:
         #Obtain gradient from users that transmit
         self.train_users(self.selected_users_UL.tolist())
 
+        tempUserAgeDL = self.UserAgeDL.clone().to(self.device)
+        
+        #Available users get the new global model
+        for user in self.intermittentUsers:
+            self.w_user[user] = [w.clone() for w in self.w_global]
+            self.UserAgeDL[user] = 0
+
+        self.aggregate_gradients(tempUserAgeDL) 
+
+        self.UserAgeDL = self.UserAgeDL + self.allOnes
+
+        return self.w_global
+    
+    def simulate_async_Asymp_CosSim(self, run, seed_index, timeframe):
+        """Handles both Slotted ALOHA and standard user processing."""
+
+        self.UserAgeUL = self.UserAgeUL + self.allOnes 
+        
+        #New Available Users
+        self.stepState()
+        if (len(self.intermittentUsers) == 0):
+            print("No users available passing")
+            return self.w_global
+        print(f"Available Users = {self.intermittentUsers}")
+
+        
+        self.train_users(self.intermittentUsers.tolist())
+
+
+        self.selected_users_UL = self.cosine_similarity_policy()
+
+        print(f"Selected User in UL: {self.selected_users_UL}")
+        
+        #Obtain gradient from users that transmit
         tempUserAgeDL = self.UserAgeDL.clone().to(self.device)
         
         #Available users get the new global model
@@ -398,6 +465,8 @@ class FederatedLearning:
             return self.simulate_async_Asymp_EI(runNo, seed_index, timeframe)
         elif self.mode == 'async_asymp_age':
             return self.simulate_async_Asymp_Age(runNo, seed_index, timeframe)
+        elif self.mode == 'async_asymp_cossim':
+            return self.simulate_async_Asymp_CosSim(runNo, seed_index, timeframe)
         else:
             raise ValueError(f"Invalid mode: {self.mode}")
  
@@ -412,3 +481,6 @@ class FederatedLearning:
     def async_Asymp_Age(self, run, seed_index, timeframe):
         print("Running Asynchronous Asymptotic Age")
         return self.simulate_async_Asymp_Age(run, seed_index, timeframe)
+    def async_Asymp_CosSim(self, run, seed_index, timeframe):
+        print("Running Asynchronous Asymptotic Cosine Similarity")
+        return self.simulate_async_Asymp_CosSim(run, seed_index, timeframe)
