@@ -19,12 +19,12 @@ sys.argv = [
     '--learning_rate_server', '0.1',  #for adam 0.001, #for sgd 0.1
     '--epochs', '1',
     '--batch_size', '400',
-    '--num_users', '10',
+    '--num_users', '100',
     '--fraction', '1',
-    '--num_timeframes', '1000',
+    '--num_timeframes', '10000',
     '--seeds', '56', #'3', #, '29', '85', '65',
     '--num_runs', '1',
-    '--selected_mode', 'async_asymp_age',
+    '--selected_mode', 'async_asymp_random',
     '--cos_similarity', '4',
     '--train_mode', 'all',
     '--bufferLimit', '1',
@@ -33,7 +33,8 @@ sys.argv = [
     '--unit_gradients', '0',
     '--adam', '0',
     '--temp', '0',
-    '--cos_similarity_type', '0'
+    '--cos_similarity_type', '0',
+    '--user_prob_disc', '0.0'
 ]
 
 # Command-line arguments
@@ -55,8 +56,9 @@ parser.add_argument('--theta_inner', type=float, default=0.9,help='Theta coeffci
 parser.add_argument('--data_mode', type=str, default='CIFAR', help='Dataset mode: MNIST or CIFAR')
 parser.add_argument('--unit_gradients', type=int, default=0, help='Whether to use unit gradients 0=False, 1=True')
 parser.add_argument('--adam', type=int, default=0, help='Whether to use FedAdam optimizer 0=False, 1=True')
-parser.add_argument('--temp', type=float, default=0.3, help='Temperature parameter [0,1] for how contribution is user selection (higher temp -> more uniform)')
+parser.add_argument('--temp', type=float, default=1, help='Temperature parameter [0,1] for how contribution is user selection (higher temp -> more uniform)')
 parser.add_argument('--cos_similarity_type', type=int, default=0, help='Type of cosine similarity calculation: 0=lowest, 1=highest')
+parser.add_argument('--user_prob_disc', type=float, default=0, help='user probability discrepancy parameter [-0.5,0.5]')
 
 args = parser.parse_args()
 
@@ -80,9 +82,10 @@ unit_gradients =  False if args.unit_gradients == 0 else True
 adam = False if args.adam == 0 else True
 temp = args.temp
 cos_similarity_type = args.cos_similarity_type
+user_prob_disc = args.user_prob_disc
 
 # Device configuration
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 torch.backends.cuda.matmul.allow_tf32 = True
 print(f"\n{'*' * 50}\n*** Using device: {device} ***\n{'*' * 50}\n")
 
@@ -152,12 +155,12 @@ for run in range(num_runs):
 
         
         keepProbAvail = np.concatenate([
-            np.full(num_users // 2, 0.3),  # First half: 0.1
-            np.full(num_users - num_users // 2, 0.9)  # Second half: 0.9
+            np.full(num_users // 2, 0.5 - user_prob_disc),  # First half: 0.1
+            np.full(num_users - num_users // 2, 0.5 + user_prob_disc)  # Second half: 0.9
         ])
         keepProbNotAvail = np.concatenate([
-            np.full(num_users // 2, 0.7),  # First half: 0.9
-            np.full(num_users - num_users // 2, 0.1)  # Second half: 0.1
+            np.full(num_users // 2, 0.5 + user_prob_disc),  # First half: 0.9
+            np.full(num_users - num_users // 2, 0.5 - user_prob_disc)  # Second half: 0.1
         ])
 
         #Initialize FL system once and for all for this seed.

@@ -445,6 +445,41 @@ class FederatedLearning:
 
         return self.w_global
     
+    def simulate_async_Asymp_random(self, run, seed_index, timeframe):
+        """Handles both Slotted ALOHA and standard user processing."""
+
+        self.UserAgeUL = self.UserAgeUL + self.allOnes 
+        
+        #New Available Users
+        self.stepState()
+        if (len(self.intermittentUsers) == 0):
+            print("No users available passing")
+            return self.w_global
+        print(f"Available Users = {self.intermittentUsers}")
+
+        idx = torch.randint(0, len(self.intermittentUsers), (1,)).item()
+
+        self.selected_users_UL = [self.intermittentUsers[idx]]
+
+        self.train_users(self.selected_users_UL)
+
+        print(f"Selected User in UL: {self.selected_users_UL}")
+        
+        #Obtain gradient from users that transmit
+        tempUserAgeDL = self.UserAgeDL.clone().to(self.device)
+        
+        #Available users get the new global model
+        for user in self.intermittentUsers:
+            self.w_user[user] = [w.clone() for w in self.w_global]
+            self.UserAgeDL[user] = 0
+
+
+        self.aggregate_gradients(tempUserAgeDL) 
+
+        self.UserAgeDL = self.UserAgeDL + self.allOnes
+
+        return self.w_global
+    
     def simulate_test(self, run, seed_index, timeframe):
         self.train_users(list(range(self.num_users)))
         for user_id in range(self.num_users):
@@ -467,20 +502,8 @@ class FederatedLearning:
             return self.simulate_async_Asymp_Age(runNo, seed_index, timeframe)
         elif self.mode == 'async_asymp_cossim':
             return self.simulate_async_Asymp_CosSim(runNo, seed_index, timeframe)
+        elif self.mode == 'async_asymp_random':
+            return self.simulate_async_Asymp_random(runNo, seed_index, timeframe)
         else:
             raise ValueError(f"Invalid mode: {self.mode}")
  
-    def test(self, run, seed_index, timeframe):
-        print("Running Test")
-        return self.simulate_test(run, seed_index, timeframe)
-
-    def async_Asymp_EI(self, run, seed_index, timeframe):
-        print("Running Asynchronous Asymptotic Age")
-        return self.simulate_async_Asymp_EI(run, seed_index, timeframe)
-    
-    def async_Asymp_Age(self, run, seed_index, timeframe):
-        print("Running Asynchronous Asymptotic Age")
-        return self.simulate_async_Asymp_Age(run, seed_index, timeframe)
-    def async_Asymp_CosSim(self, run, seed_index, timeframe):
-        print("Running Asynchronous Asymptotic Cosine Similarity")
-        return self.simulate_async_Asymp_CosSim(run, seed_index, timeframe)
