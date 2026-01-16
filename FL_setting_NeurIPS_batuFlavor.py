@@ -546,6 +546,8 @@ class FederatedLearning:
             return self.simulate_async_Asymp_CosSim(runNo, seed_index, timeframe)
         elif self.mode == 'async_asymp_random':
             return self.simulate_async_Asymp_random(runNo, seed_index, timeframe)
+        elif self.mode == 'async_asymp_fresh':
+            return self.simulate_async_Asymp_Fresh(runNo, seed_index, timeframe)
         else:
             raise ValueError(f"Invalid mode: {self.mode}")
  
