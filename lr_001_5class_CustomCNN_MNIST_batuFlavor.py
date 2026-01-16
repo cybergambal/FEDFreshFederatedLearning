@@ -32,9 +32,9 @@ sys.argv = [
      '--data_mode', 'CIFAR',
      '--unit_gradients', '0',
      '--adam', '0',
-     '--temp', '0.5',
+     '--temp', '0.2',
      '--cos_similarity_type', '0',
-     '--user_prob_disc', '0.375',
+     '--user_prob_disc', '0.45',
      '--cuda', '1'
  ]
 

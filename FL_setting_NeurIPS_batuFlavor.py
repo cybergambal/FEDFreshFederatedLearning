@@ -458,9 +458,9 @@ class FederatedLearning:
             return self.w_global
         print(f"Available Users = {self.intermittentUsers}")
 
-        idx = torch.randint(0, len(self.intermittentUsers), (1,)).item()
+        idx = torch.randint(0, len(self.intermittentUsers), (self.bufferLimit,)).tolist()
 
-        self.selected_users_UL = [self.intermittentUsers[idx]]
+        self.selected_users_UL = [self.intermittentUsers[i] for i in idx]
 
         self.train_users(self.selected_users_UL)
 
