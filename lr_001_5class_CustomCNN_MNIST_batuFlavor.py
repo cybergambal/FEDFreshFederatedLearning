@@ -14,31 +14,32 @@ from utils import get_data_loaders, get_Model, evaluate_per_label_accuracy, save
 start_time = time.time()
 # Simulate command-line arguments
 sys.argv = [
-    'placeholder_script_name',
-    '--learning_rate_client', '0.01',   #for adam 0.01, #for sgd 0.01
-    '--learning_rate_server', '0.1',  #for adam 0.001, #for sgd 0.1
-    '--epochs', '1',
-    '--batch_size', '400',
-    '--num_users', '100',
-    '--fraction', '1',
-    '--num_timeframes', '10000',
-    '--seeds', '56', #'3', #, '29', '85', '65',
-    '--num_runs', '1',
-    '--selected_mode', 'async_asymp_random',
-    '--cos_similarity', '4',
-    '--train_mode', 'all',
-    '--bufferLimit', '1',
-    '--theta_inner', '0.1',
-    '--data_mode', 'CIFAR',
-    '--unit_gradients', '0',
-    '--adam', '0',
-    '--temp', '0',
-    '--cos_similarity_type', '0',
-    '--user_prob_disc', '0.0'
-]
+     'placeholder_script_name',
+     '--learning_rate_client', '0.01',   #for adam 0.01, #for sgd 0.01
+     '--learning_rate_server', '0.1',  #for adam 0.001, #for sgd 0.1
+     '--epochs', '1',
+     '--batch_size', '400',
+     '--num_users', '100',
+     '--fraction', '1',
+     '--num_timeframes', '1000',
+     '--seeds', '56', #'3', #, '29', '85', '65',
+     '--num_runs', '1',
+     '--selected_mode', 'async_asymp_EI',
+     '--cos_similarity', '4',
+     '--train_mode', 'all',
+     '--bufferLimit', '10',
+     '--theta_inner', '0.1',
+     '--data_mode', 'CIFAR',
+     '--unit_gradients', '0',
+     '--adam', '0',
+     '--temp', '0.5',
+     '--cos_similarity_type', '0',
+     '--user_prob_disc', '0.375',
+     '--cuda', '1'
+ ]
 
 # Command-line arguments
-parser = argparse.ArgumentParser(description="Federated Learning with Slotted ALOHA and CIFAR-10 Dataset")
+parser = argparse.ArgumentParser(description="Federated Learning with Slotted ALOHA and CIFAR-10 Dataset", fromfile_prefix_chars='@')
 parser.add_argument('--learning_rate_client', type=float, default=0.0001, help='Learning rate for client training')
 parser.add_argument('--learning_rate_server', type=float, default=0.0001, help='Learning rate for server training')
 parser.add_argument('--epochs', type=int, default=3, help='Number of epochs for training')
@@ -59,6 +60,7 @@ parser.add_argument('--adam', type=int, default=0, help='Whether to use FedAdam 
 parser.add_argument('--temp', type=float, default=1, help='Temperature parameter [0,1] for how contribution is user selection (higher temp -> more uniform)')
 parser.add_argument('--cos_similarity_type', type=int, default=0, help='Type of cosine similarity calculation: 0=lowest, 1=highest')
 parser.add_argument('--user_prob_disc', type=float, default=0, help='user probability discrepancy parameter [-0.5,0.5]')
+parser.add_argument('--cuda', type=int, default=0, help='CUDA device number to use')
 
 args = parser.parse_args()
 
@@ -83,9 +85,10 @@ adam = False if args.adam == 0 else True
 temp = args.temp
 cos_similarity_type = args.cos_similarity_type
 user_prob_disc = args.user_prob_disc
+cuda_device = args.cuda
 
 # Device configuration
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device(f"cuda:{cuda_device}" if torch.cuda.is_available() else "cpu")
 torch.backends.cuda.matmul.allow_tf32 = True
 print(f"\n{'*' * 50}\n*** Using device: {device} ***\n{'*' * 50}\n")
 

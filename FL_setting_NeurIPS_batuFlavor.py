@@ -157,7 +157,6 @@ class FederatedLearning:
 
         inverseSum = np.sum(r**(-1))
         pi = (r**(-1) / inverseSum)
-        print(f"pi: {pi}")
 
         # SortFunc = lambda a : a[1]
         # rTemp = list(enumerate(list(r)))
@@ -178,8 +177,10 @@ class FederatedLearning:
         print(f"pi_cont: {pi_cont}")
 
         pi = pi / np.dot(pon, pi) * self.bufferLimit
+        print(f"pi: {pi}")
 
         pi = pi_cont * (1 - self.temperature) + pi * self.temperature
+        print(f"Overall pi: {pi}")
 
         return pi
 
