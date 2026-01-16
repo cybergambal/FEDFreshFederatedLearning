@@ -481,6 +481,47 @@ class FederatedLearning:
 
         return self.w_global
     
+    def simulate_async_Asymp_Fresh(self, run, seed_index, timeframe):
+        """Handles both Slotted ALOHA and standard user processing."""
+
+        self.UserAgeUL = self.UserAgeUL + self.allOnes 
+        
+        #New Available Users
+        self.stepState()
+        if (len(self.intermittentUsers) == 0):
+            print("No users available passing")
+            return self.w_global
+        print(f"Available Users = {self.intermittentUsers}")
+
+        FreshUsers = np.where(self.UserAgeDL[self.intermittentUsers]==1)[0]
+
+        if len(FreshUsers) == 0:
+            print("No fresh users available")
+            return self.w_global
+
+        k = min(self.bufferLimit, len(FreshUsers))
+        idx = torch.randint(0, len(FreshUsers), (k,)).tolist()
+        self.selected_users_UL = self.intermittentUsers[FreshUsers[idx]]
+
+        self.train_users(self.selected_users_UL)
+
+        print(f"Selected User in UL: {self.selected_users_UL}")
+        
+        #Obtain gradient from users that transmit
+        tempUserAgeDL = self.UserAgeDL.clone().to(self.device)
+        
+        #Available users get the new global model
+        for user in self.intermittentUsers:
+            self.w_user[user] = [w.clone() for w in self.w_global]
+            self.UserAgeDL[user] = 0
+
+
+        self.aggregate_gradients(tempUserAgeDL) 
+
+        self.UserAgeDL = self.UserAgeDL + self.allOnes
+
+        return self.w_global
+    
     def simulate_test(self, run, seed_index, timeframe):
         self.train_users(list(range(self.num_users)))
         for user_id in range(self.num_users):
