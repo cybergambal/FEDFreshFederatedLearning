@@ -1,1 +1,6 @@
 results*
+simulation*
+data*
+logs*
+input*
+__pycache__*

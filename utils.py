@@ -7,6 +7,7 @@ from torch import nn
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
+import copy 
 
 from byzfl import DataDistributor
 
@@ -18,7 +19,7 @@ def get_data_loaders(data_mode, batch_size, num_users):
     :param batch_size: Batch size for data loaders
     :param num_users: Number of users for data distribution
     """
-    if data_mode == "MNIST":
+    if data_mode == "MNIST" or data_mode == "Regression":
         # MNIST dataset and preprocessing
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -48,7 +49,7 @@ def get_data_loaders(data_mode, batch_size, num_users):
     num_cores = os.cpu_count()
     num_workers = min(4, num_cores) if num_cores else 0
 
-    data_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    data_loader = torch.utils.data.DataLoader(trainset, batch_size=len(trainset), shuffle=True, num_workers=num_workers)
     
     labels_group1 = [0,1,2,3,4]
     labels_group2 = [5,6,7,8,9]
@@ -72,8 +73,25 @@ def get_data_loaders(data_mode, batch_size, num_users):
         "data_loader": trainset_group2,
         "batch_size": batch_size,
     }
+    whole_params_group1 = {
+        "data_distribution_name": "iid",
+        "nb_honest": num_users//2,
+        "data_loader": trainset_group1,
+        "batch_size": len(trainset_group1) // (num_users//2),
+    }
+
+    whole_params_group2 = {
+        "data_distribution_name": "iid",
+        "nb_honest": num_users - num_users//2,
+        "data_loader": trainset_group2,
+        "batch_size": len(trainset_group2) // (num_users - num_users//2),
+    }
     distributor_group1 = DataDistributor(params_group1)
     distributor_group2 = DataDistributor(params_group2)
+    whole_distributor_group1 = DataDistributor(whole_params_group1)
+    whole_distributor_group2 = DataDistributor(whole_params_group2)
+    WholeTrainSetUsers = whole_distributor_group1.split_data()
+    WholeTrainSetUsers.extend(whole_distributor_group2.split_data())
     TrainSetUsers = distributor_group1.split_data()
     TrainSetUsers.extend(distributor_group2.split_data())
     testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
@@ -82,14 +100,14 @@ def get_data_loaders(data_mode, batch_size, num_users):
     print(len(TrainSetUsers[0].dataset), "samples allocated to each user.")
     assert len(trainset) >= num_users * (len(trainset) // num_users), "Dataset too small for requested user allocation!"
 
-    return TrainSetUsers, testloader
+    return TrainSetUsers, testloader, data_loader, WholeTrainSetUsers
 
 def get_Model(data_mode, train_mode='all'):
 
     """
     Get the model class based on the dataset and training mode.
     
-    :param data_mode: Dataset mode ("MNIST" or "CIFAR")
+    :param data_mode: Dataset mode ("Regression", "MNIST" or "CIFAR")
     :param train_mode: Training mode ("all", "dense", or "conv")
     """
 
@@ -126,8 +144,20 @@ def get_Model(data_mode, train_mode='all'):
                 x = x.view(x.size(0), -1)
                 x = F.relu(self.fc1(x))
                 return self.fc2(x)
+    
+    elif data_mode == "Regression":
+        class Model(nn.Module):
+            def __init__(self, num_classes=10):
+                super().__init__()
+                self.fc1 = nn.Linear(28*28, num_classes)
 
-    else:
+            def forward(self, x):
+                x = x.view(x.size(0), -1)
+                out = F.sigmoid(self.fc1(x))
+                return out
+        
+
+    elif data_mode == "CIFAR":
         class ResidualBlock(nn.Module):
             def __init__(self, inchannel, outchannel, stride=1):
                 super(ResidualBlock, self).__init__() 
@@ -238,7 +268,7 @@ def evaluate_per_label_accuracy(model, testloader, device, num_classes=10):
     
     return per_label_accuracy, overall_accuracy
 
-def save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_users_over_time, expected_gradient_magnitude, num_users, num_timeframes, args, current_time, start_time, elapsed_time, end_time, num_runs, seeds_for_avg, num_send):
+def save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_users_over_time, expected_gradient_magnitude, expected_true_gradient_magnitude, num_users, num_timeframes, args, current_time, start_time, elapsed_time, end_time, num_runs, seeds_for_avg, num_send, Nmax, P_onmin, Rmin, Nkstar, L, max_sigma_l, max_sigma_g, max_G, fw0):
     """
     Save accuracy distributions and contribution distributions to CSV files.
 
@@ -291,6 +321,29 @@ def save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_
                     'User': user,
                     'ExpectedGradientMagnitude': expected_gradient_magnitude[run][seed_index][user],
                 })
+    
+    expected_gradient_data = []
+    for user in range(num_users):
+        for run in range(num_runs):
+            for seed_index, seed in enumerate(seeds_for_avg):
+                expected_gradient_data.append({
+                    'Run': run,
+                    'Seed': seed,
+                    'User': user,
+                    'ExpectedGradientMagnitude': expected_gradient_magnitude[run][seed_index][user],
+                })
+
+    expected_true_gradient_data = []
+    for timeframe in range(num_timeframes):
+        for run in range(num_runs):
+            for seed_index, seed in enumerate(seeds_for_avg):
+                expected_true_gradient_data.append({
+                    'Run': run,
+                    'Seed': seed,
+                    'Timeframe': timeframe + 1,
+                    'ExpectedTrueGradientMagnitude': expected_true_gradient_magnitude[run][seed_index][timeframe],
+                })
+
 
     chosen_users_over_time_data = []
     for run in range(num_runs):
@@ -308,6 +361,7 @@ def save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_
     final_results_df = pd.DataFrame(final_results)
     contribution_data_df = pd.DataFrame(contribution_data)
     expected_gradient_data_df = pd.DataFrame(expected_gradient_data)
+    expected_true_gradient_data_df = pd.DataFrame(expected_true_gradient_data)
     chosen_users_over_time_df = pd.DataFrame(chosen_users_over_time_data)
     file_path = os.path.join(save_dir, 'final_results.csv')
     final_results_df.to_csv(file_path, index=False)
@@ -317,10 +371,13 @@ def save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_
     chosen_users_over_time_df.to_csv(chosen_users_file_path, index=False)
     expected_gradient_file_path = os.path.join(save_dir, 'expected_gradient_magnitude.csv')
     expected_gradient_data_df.to_csv(expected_gradient_file_path, index=False)
+    expected_true_gradient_file_path = os.path.join(save_dir, 'expected_true_gradient_magnitude.csv')
+    expected_true_gradient_data_df.to_csv(expected_true_gradient_file_path, index=False)
     print(f"Final results saved to: {file_path}")
     print(f"Contribution data saved to: {contribution_file_path}")
     print(f"Chosen users over time data saved to: {chosen_users_file_path}")
     print(f"Expected gradient magnitude data saved to: {expected_gradient_file_path}")
+    print(f"Expected true gradient magnitude data saved to: {expected_true_gradient_file_path}")
     # Save correctly received packets statistics to CSV
 
     # Save run summary
@@ -330,6 +387,15 @@ def save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_
         f"Elapsed Time: {elapsed_time:.2f} seconds\n"
         f"Arguments: {vars(args)}\n"
         f"Average gradient per round: {num_send/num_timeframes}\n"
+        f"Nmax: {Nmax}\n"
+        f"P_onmin: {P_onmin}\n"
+        f"Rmin: {Rmin}\n"
+        f"Nkstar: {Nkstar}\n"
+        f"Lipschitz Constant (L): {L:.4f}\n"
+        f"Local Variance Bound (sigma_l): {max_sigma_l:.4f}\n"
+        f"Global Variance Bound (sigma_g): {max_sigma_g:.4f}\n"
+        f"Gradient Magnitude Bound (G): {max_G:.4f}\n"
+        f"Initial Global Loss f(w^0): {fw0:.6f}\n"
     )
 
     summary_file_path = os.path.join(save_dir, 'run_summary.txt')
@@ -337,3 +403,184 @@ def save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_
         summary_file.write(summary_content)
 
     print(f"Run summary saved to: {summary_file_path}")
+
+    import torch
+
+def calculate_lipschitz_constant(TrainSetUsers, device="cpu"):
+    """
+    Calculates the strict global Lipschitz constant L for Logistic Regression 
+    across a federated dataset.
+    """
+    L_max = 0.0
+    
+    for user_idx, user_dataloader in enumerate(TrainSetUsers):
+        features = []
+        
+        for images, _ in user_dataloader:
+            features.append(images.view(images.size(0), -1))
+            
+        X_u = torch.cat(features, dim=0).to(device)
+        N_u = X_u.size(0) # Number of local samples
+        
+        XT_X = torch.matmul(X_u.T, X_u) / N_u
+        
+        eigenvalues = torch.linalg.eigvalsh(XT_X)
+        lambda_max = eigenvalues.max().item()
+        
+        L_u = 0.25 * lambda_max
+        
+        if L_u > L_max:
+            L_max = L_u
+            
+    print(f"--> Global Lipschitz Constant (L): {L_max:.4f}")
+    return L_max
+
+def calculate_gradient_difference(w_before, w_after):
+    return [w_after[k] - w_before[k] for k in range(len(w_after))]
+
+def calculate_gradient_magnitude(gradient_diff):
+    return sum(torch.sum(g**2) for g in gradient_diff).item()
+
+def calculate_whole_gradient(user_id, device, w_current, model, WholeTrainSetUsers, epochs, criterion):
+    # Reset model weights to the initial weights before each user's local training
+    with torch.no_grad():
+        for param, saved in zip(model.parameters(), w_current):
+            param.copy_(saved) 
+    torch.cuda.empty_cache()
+
+    # Retrieve the user's training data (combined from all memory cells)
+    Wholetrainloader = WholeTrainSetUsers[user_id]
+    local_optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+    
+    for epoch in range(epochs):
+        for image, label in Wholetrainloader:
+            local_optimizer.zero_grad(set_to_none=True)     
+            image, label = image.to(device), label.to(device)  
+            output = model(image)
+            loss = criterion(output, label)
+            loss.backward()
+            local_optimizer.step()
+            torch.cuda.empty_cache()
+
+    w_new = [param.data.clone().to(device) for param in model.parameters()]
+    gradient_diff = calculate_gradient_difference(w_current, w_new)
+
+    return gradient_diff
+
+def calculate_true_gradient(device, w_current, model, WholeTrainSet, epochs, criterion):
+    # Reset model weights to the initial weights before each user's local training
+    with torch.no_grad():
+        for param, saved in zip(model.parameters(), w_current):
+            param.copy_(saved) 
+    torch.cuda.empty_cache()
+
+    # Retrieve the user's training data (combined from all memory cells)
+    Wholetrainloader = WholeTrainSet
+    local_optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+    
+    for epoch in range(epochs):
+        for image, label in Wholetrainloader:
+            local_optimizer.zero_grad(set_to_none=True)     
+            image, label = image.to(device), label.to(device)  
+            output = model(image)
+            loss = criterion(output, label)
+            loss.backward()
+            local_optimizer.step()
+            torch.cuda.empty_cache()
+
+    w_new = [param.data.clone().to(device) for param in model.parameters()]
+    gradient_diff = calculate_gradient_difference(w_current, w_new)
+
+    return gradient_diff
+
+def calculate_constants(num_users, device, w_global, model, TrainSetUsers, WholeTrainSetUsers, WholeTrainSet, epochs, optimizer, criterion):
+    
+    max_sigma_l = 0.0
+    max_sigma_g = 0.0
+    max_G = 0.0
+
+    for user_id in range(num_users):
+        print(user_id, end=' ')
+        cur_sigma_l = 0.0
+        iii = 0
+
+        # Reset model weights to the initial weights before each user's local training
+        with torch.no_grad():
+            for param, saved in zip(model.parameters(), w_global):
+                param.copy_(saved) 
+        torch.cuda.empty_cache()
+
+        model2 = copy.deepcopy(model).to(device)
+
+        # Retrieve the user's training data (combined from all memory cells)
+        trainloader = TrainSetUsers[user_id]
+        
+        for epoch in range(epochs):
+            for image, label in trainloader:
+                optimizer.zero_grad(set_to_none=True)     
+                image, label = image.to(device), label.to(device)  
+                output = model(image)
+                loss = criterion(output, label)
+                loss.backward()
+                optimizer.step()
+                torch.cuda.empty_cache()
+                
+                w_new = [param.data.clone().to(device) for param in model.parameters()]
+                
+                gradient_diff = calculate_gradient_difference(w_global, w_new)
+                whole_gradient_diff = calculate_whole_gradient(user_id, device, w_global, model2, WholeTrainSetUsers, epochs, criterion)
+                true_gradient_diff = calculate_true_gradient(device, w_global, model2, WholeTrainSet, epochs, criterion)
+                
+                gradient_magnitude = calculate_gradient_magnitude(gradient_diff)
+                varience = calculate_gradient_magnitude(calculate_gradient_difference(gradient_diff, whole_gradient_diff))
+                whole_true_diff_magnitude = calculate_gradient_magnitude(calculate_gradient_difference(whole_gradient_diff, true_gradient_diff))
+
+                if gradient_magnitude > max_G:
+                    max_G = gradient_magnitude
+                
+                cur_sigma_l += varience
+
+                if whole_true_diff_magnitude > max_sigma_g:
+                    max_sigma_g = whole_true_diff_magnitude
+
+                w_global = w_new
+                iii += 1
+        sigma_l = cur_sigma_l / (iii+1)
+        if sigma_l > max_sigma_l:
+            max_sigma_l = sigma_l
+
+    print(f"--> Local Variance Bound (sigma_l): {max_sigma_l:.4f}")
+    print(f"--> Global Variance Bound (sigma_g): {max_sigma_g:.4f}")
+    print(f"--> Gradient Magnitude Bound (G): {max_G:.4f}")
+    return max_sigma_l, max_sigma_g, max_G
+
+
+    
+def calculate_init_loss(model, WholeTrainSet, criterion, device):
+    """
+    Calculates the f(w^0) 
+    """
+    print("\nCalculating f(w^0)")
+    
+    # ---------------------------------------------------------
+    # 1. Calculate Initial Global Loss: f(w^0)
+    # ---------------------------------------------------------
+    model.eval()
+    initial_loss_sum = 0.0
+    total_samples = 0
+    
+    with torch.no_grad():
+        for images, labels in WholeTrainSet:
+            images, labels = images.to(device), labels.to(device)
+            images = images.view(images.size(0), -1)
+            
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            
+            # Multiply by batch size to get the total sum of losses
+            initial_loss_sum += loss.item() * images.size(0)
+            total_samples += images.size(0)
+            
+    f_w0 = initial_loss_sum / total_samples
+    print(f"--> Initial Global Loss f(w^0): {f_w0:.6f}")
+    return f_w0

@@ -8,33 +8,33 @@ from datetime import datetime
 import sys
 import random as rnd
 from FL_setting_NeurIPS_batuFlavor import FederatedLearning
-from utils import get_data_loaders, get_Model, evaluate_per_label_accuracy, save_data_to_csv
+from utils import calculate_constants, get_data_loaders, get_Model, evaluate_per_label_accuracy, save_data_to_csv, calculate_lipschitz_constant, calculate_init_loss
 
 # Start time
 start_time = time.time()
 # Simulate command-line arguments
 sys.argv = [
      'placeholder_script_name',
-     '--learning_rate_client', '0.01',   #for adam 0.01, #for sgd 0.01
-     '--learning_rate_server', '0.1',  #for adam 0.001, #for sgd 0.1
+     '--learning_rate_client', '0.1',   #for adam 0.01, #for sgd 0.01
+     '--learning_rate_server', '0.01',  #for adam 0.001, #for sgd 0.1
      '--epochs', '1',
      '--batch_size', '400',
      '--num_users', '100',
      '--fraction', '1',
-     '--num_timeframes', '1000',
+     '--num_timeframes', '10000',
      '--seeds', '56', #'3', #, '29', '85', '65',
      '--num_runs', '1',
      '--selected_mode', 'async_asymp_EI',
      '--cos_similarity', '4',
      '--train_mode', 'all',
-     '--bufferLimit', '10',
+     '--bufferLimit', '1',
      '--theta_inner', '0.1',
-     '--data_mode', 'CIFAR',
+     '--data_mode', 'Regression',
      '--unit_gradients', '0',
      '--adam', '0',
-     '--temp', '0.2',
+     '--temp', '0.6',
      '--cos_similarity_type', '0',
-     '--user_prob_disc', '0.45',
+     '--user_prob_disc', '0.15',
      '--cuda', '1'
  ]
 
@@ -126,6 +126,14 @@ expected_gradient_magnitude = {
     for run in range(num_runs)
 }
 
+expected_true_gradient_magnitude = {
+    run: {
+        seed_index: {timeframe: None for timeframe in range(num_timeframes)}
+        for seed_index in range(len(seeds_for_avg))
+    }
+    for run in range(num_runs)
+}
+
 #Load model
 Model = get_Model(data_mode, train_mode=train_mode)
 
@@ -139,7 +147,10 @@ for run in range(num_runs):
         torch.manual_seed(seed)
         
         # Load data
-        TrainSetUsers, testloader = get_data_loaders(data_mode, batch_size, num_users)
+        TrainSetUsers, testloader, WholeDataset, WholeTrainSetUsers = get_data_loaders(data_mode, batch_size, num_users)
+        L = calculate_lipschitz_constant(TrainSetUsers)
+        #L = 71.1426
+
 
         print(f"************ Seed {seed_index} ************")
         
@@ -149,14 +160,20 @@ for run in range(num_runs):
         # Initialize the model
        
         model = Model(num_classes=num_classes).to(device)
-        
+        model_temp = Model(num_classes=num_classes).to(device)  # Temporary model for calculating constants
         
         criterion = nn.CrossEntropyLoss()
+        criterion_temp = nn.CrossEntropyLoss()  #temporary criterion for calculating constants
         #optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-        
-        optimizer = optim.SGD(model.parameters(), momentum=0.9, lr=learning_rate_client, weight_decay=1e-4)
+        fw0 = calculate_init_loss(model, WholeDataset, criterion, device)
 
-        
+        optimizer = optim.SGD(model.parameters(), lr=learning_rate_client)
+        optimizer_temp = optim.SGD(model_temp.parameters(), lr=1.0)  # Temporary optimizer for calculating constants
+    
+        w_global = [param.data.clone() for param in model.parameters()]
+        max_sigma_l, max_sigma_g, max_G = calculate_constants(num_users, device, w_global, model_temp, TrainSetUsers, WholeTrainSetUsers, WholeDataset, 1, optimizer_temp, criterion_temp)
+        #max_sigma_l, max_sigma_g, max_G = 18.0440, 53.6719, 2.5634
+
         keepProbAvail = np.concatenate([
             np.full(num_users // 2, 0.5 - user_prob_disc),  # First half: 0.1
             np.full(num_users - num_users // 2, 0.5 + user_prob_disc)  # Second half: 0.9
@@ -166,10 +183,12 @@ for run in range(num_runs):
             np.full(num_users - num_users // 2, 0.5 - user_prob_disc)  # Second half: 0.1
         ])
 
+        cur_grad_mag = 0.0
+
         #Initialize FL system once and for all for this seed.
         fl_system = FederatedLearning(
             selected_mode, num_users, device,
-            cos_similarity, model, TrainSetUsers, epochs, optimizer, criterion, fraction,
+            cos_similarity, model, TrainSetUsers, WholeDataset, epochs, optimizer, criterion, fraction,
             testloader, learning_rate_server, train_mode, keepProbAvail, keepProbNotAvail, 
             bufferLimit, theta_inner, unit_gradients, adam, temp, cos_similarity_type
             )
@@ -187,13 +206,17 @@ for run in range(num_runs):
                     for param, saved in zip(model.parameters(), new_weights):
                         param.copy_(saved) 
 
-            
+
                 per_label_accuracy, accuracy = evaluate_per_label_accuracy(model, testloader, device, num_classes=10)
+
+                cur_grad_mag = fl_system.calculate_true_gradient_magnitude()
 
             for index, user in enumerate(fl_system.selected_users_UL):
                 chosen_users_over_time[run][seed_index][timeframe][user] = fl_system.selected_users_UL[index]
 
             accuracy_distributions[run][seed_index][timeframe] = accuracy
+
+            expected_true_gradient_magnitude[run][seed_index][timeframe] = cur_grad_mag
 
             torch.cuda.empty_cache()
 
@@ -204,6 +227,10 @@ for run in range(num_runs):
         for user in range(num_users):
             expected_gradient_magnitude[run][seed_index][user] = fl_system.expected_gradient_magnitude[user]
         num_send = fl_system.num_send
+        Nmax = fl_system.Nmax
+        P_onmin = fl_system.P_onmin
+        Rmin = fl_system.Rmin
+        Nkstar = fl_system.Nkstar
         del model
         del new_weights
         del fl_system
@@ -213,4 +240,4 @@ for run in range(num_runs):
 end_time = time.time()
 elapsed_time = end_time - start_time
 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_users_over_time, expected_gradient_magnitude, num_users, num_timeframes, args, current_time, start_time, elapsed_time, end_time, num_runs, seeds_for_avg, num_send)
+save_data_to_csv(accuracy_distributions, contribution_distributions, chosen_users_over_time, expected_gradient_magnitude, expected_true_gradient_magnitude, num_users, num_timeframes, args, current_time, start_time, elapsed_time, end_time, num_runs, seeds_for_avg, num_send, Nmax, P_onmin, Rmin, Nkstar, L, max_sigma_l, max_sigma_g, max_G, fw0)

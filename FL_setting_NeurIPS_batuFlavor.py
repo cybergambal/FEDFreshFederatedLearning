@@ -8,7 +8,7 @@ import time
 import heapq
 class FederatedLearning:
     def __init__(self, mode, num_users, device, 
-                    cos_similarity, model, TrainSetUsers, epochs, optimizer, criteron, fraction, 
+                    cos_similarity, model, TrainSetUsers, WholeTrainSet, epochs, optimizer, criteron, fraction, 
                     testloader, learning_rate_server, train_mode, keepProbAvail, keepProbNotAvail, 
                     bufferLimit, theta_inner, unit_gradients, adam, temp, cos_similarity_type):
         
@@ -45,6 +45,7 @@ class FederatedLearning:
         self.optimizer = optimizer
         self.criteron = criteron
         self.TrainSetUsers = TrainSetUsers 
+        self.WholeTrainSet = WholeTrainSet
         self.testloader = testloader
 
         #Intermittent user model
@@ -67,6 +68,10 @@ class FederatedLearning:
         self.nu_orthogonal = 5.67 #tan(80)
 
         #Policy calculation
+        self.Nmax = 0.0
+        self.P_onmin = 0.0
+        self.Rmin = 0.0
+        self.Nkstar = 0.0
         self.temperature = temp
         self.pi = self.calculate_policy()
         
@@ -88,6 +93,9 @@ class FederatedLearning:
 
             self.adamMomentum = [torch.zeros_like(param).to(self.device) for param in self.w_global]
             self.adamVariance = [torch.full_like(param, self.tau**2).to(self.device) for param in self.w_global]
+
+    def calculate_gradient_magnitude(self, gradient_diff):
+        return sum(torch.sum(g**2) for g in gradient_diff).item()
 
     def lp_cosine_similarity(self, x: torch.Tensor, y: torch.Tensor, p: int = 2) -> float:
         """
@@ -131,11 +139,40 @@ class FederatedLearning:
         chosen_list = [user for val, user in chosen_list]
 
         return chosen_list
+
+    def calculate_true_gradient_magnitude(self):
+        # Reset model weights to the initial weights before each user's local training
+        with torch.no_grad():
+            for param, saved in zip(self.model.parameters(), self.w_global):
+                param.copy_(saved) 
+        torch.cuda.empty_cache()
+
+        # Retrieve the user's training data (combined from all memory cells)
+        Wholetrainloader = self.WholeTrainSet
+        local_optimizer = torch.optim.SGD(self.model.parameters(), lr=1.0)
+        
+        for epoch in range(self.epochs):
+            for image, label in Wholetrainloader:
+                local_optimizer.zero_grad(set_to_none=True)     
+                image, label = image.to(self.device), label.to(self.device)  
+                output = self.model(image)
+                loss = self.criteron(output, label)
+                loss.backward()
+                local_optimizer.step()
+                torch.cuda.empty_cache()
+
+        w_new = [param.data.clone().to(self.device) for param in self.model.parameters()]
+        gradient_diff = self.calculate_gradient_difference(self.w_global, w_new)
+        grad_mag = self.calculate_gradient_magnitude(gradient_diff)
+        print(f"True Gradient Magnitude: {grad_mag}")
+
+        return grad_mag
     
     def calculate_policy(self):
         pi = np.zeros((self.num_users))
         r = np.zeros((self.num_users)) 
         pon = np.zeros((self.num_users))
+        denums = np.zeros((self.num_users))
         pi_cont = np.hstack((np.zeros((self.num_users//2)), np.ones((self.num_users - self.num_users//2))))
 
         for iii in range(self.num_users):
@@ -150,10 +187,15 @@ class FederatedLearning:
             
             # Denominator
             denominator = 1 + P10 / P01
+            denums[iii] = denominator
             
             r[iii] = numerator / denominator
             pon[iii] = P01/(P01 + P10)
 
+        self.Rmin = np.min(r)
+        self.Nmax = np.max(r)*np.max(denums)
+        self.P_onmin = np.min(pon)
+        self.Nkstar = self.Nmax
 
         inverseSum = np.sum(r**(-1))
         pi = (r**(-1) / inverseSum)
