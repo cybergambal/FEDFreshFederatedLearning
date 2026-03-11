@@ -174,6 +174,7 @@ class FederatedLearning:
         pon = np.zeros((self.num_users))
         denums = np.zeros((self.num_users))
         pi_cont = np.hstack((np.zeros((self.num_users//2)), np.ones((self.num_users - self.num_users//2))))
+        n_u_array = np.zeros((self.num_users))
 
         for iii in range(self.num_users):
             P10 = 1 - self.keepProbAvail[iii]
@@ -184,6 +185,8 @@ class FederatedLearning:
             term2 = (P10 * P01) / (1 - P01)
             term3 = (P10 * P01) / ((1 - P01) ** 2) * np.log(P01)
             numerator = term1 - term2 - term3
+
+            n_u_array[iii] = numerator
             
             # Denominator
             denominator = 1 + P10 / P01
@@ -193,7 +196,7 @@ class FederatedLearning:
             pon[iii] = P01/(P01 + P10)
 
         self.Rmin = np.min(r)
-        self.Nmax = np.max(r)*np.max(denums)
+        self.Nmax = np.max(n_u_array)
         self.P_onmin = np.min(pon)
         self.Nkstar = self.Nmax
 

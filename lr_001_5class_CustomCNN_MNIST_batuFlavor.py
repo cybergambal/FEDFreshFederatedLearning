@@ -32,10 +32,10 @@ sys.argv = [
      '--data_mode', 'Regression',
      '--unit_gradients', '0',
      '--adam', '0',
-     '--temp', '0.6',
+     '--temp', '0',
      '--cos_similarity_type', '0',
      '--user_prob_disc', '0.15',
-     '--cuda', '1'
+     '--cuda', '0'
  ]
 
 # Command-line arguments
