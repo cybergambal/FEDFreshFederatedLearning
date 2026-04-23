@@ -8,7 +8,6 @@ import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
 
-from byzfl import DataDistributor
 
 def get_data_loaders(data_mode, batch_size, num_users, dirichlet_alpha):
     """

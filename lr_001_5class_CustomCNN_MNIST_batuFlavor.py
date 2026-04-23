@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.optim as optim
 from torch import nn
@@ -10,9 +11,62 @@ import random as rnd
 from FL_setting_NeurIPS_batuFlavor import FederatedLearning
 from utils import get_data_loaders, get_Model, evaluate_per_label_accuracy, save_data_to_csv
 
+
+# ---------------------------------------------------------------------------
+# Policy helpers (synchronized with plotGraphs2.py -- do not rename/reorder)
+# ---------------------------------------------------------------------------
+def _compute_R_u(P01, P10):
+    if P10 == 0 and 0 < P01 <= 1:
+        return 1.0
+    if P01 == 0 and 0 < P10 <= 1:
+        return 0.0
+    if P01 == 1 and P10 == 1:
+        return 0.25
+    num = (
+        (1 - P10)
+        - (P10 * P01) / (1 - P01)
+        - (P10 * P01) / ((1 - P01) ** 2) * math.log(P01)
+    )
+    den = 1 + P10 / P01
+    return num / den
+
+
+def _compute_P_on(P01, P10):
+    return P01 / (P01 + P10)
+
+
+def _compute_policies(user_params, K):
+    """Return (p_unif, p_eff) matching plotGraphs2.compute_policies."""
+    U = len(user_params)
+    R = np.array([_compute_R_u(*pp) for pp in user_params], dtype=float)
+    P_on = np.array([_compute_P_on(*pp) for pp in user_params], dtype=float)
+    with np.errstate(divide="ignore"):
+        inv_R = np.where(R > 0, 1.0 / R, 0.0)
+    denom = float(np.sum(P_on * inv_R))
+    p_unif = np.clip(K * inv_R / denom, 0.0, 1.0)
+    gamma_u = np.where(P_on > 0, R / P_on, -np.inf)
+    order = np.argsort(-gamma_u)
+    p_eff = np.zeros(U, dtype=float)
+    budget = float(K)
+    for idx in order:
+        if budget <= 0:
+            break
+        cost = P_on[idx]
+        if cost <= 0:
+            continue
+        if budget >= cost:
+            p_eff[idx] = 1.0
+            budget -= cost
+        else:
+            p_eff[idx] = budget / cost
+            budget = 0.0
+    return p_unif, p_eff
+
 # Start time
 start_time = time.time()
-# Simulate command-line arguments
+# Save real command-line args before overriding (lets --temp $t work from shell)
+_real_argv = sys.argv[1:]
+# Simulate command-line arguments (defaults; overridden below for --temp)
 sys.argv = [
     'placeholder_script_name',
     '--learning_rate_client', '0.01',   #for adam 0.01, #for sgd 0.01
@@ -35,6 +89,12 @@ sys.argv = [
     '--adam', '0',
     '--temp', '0.3'
 ]
+# Allow --temp to be overridden from the real command line (e.g. --temp 0.6)
+if '--temp' in _real_argv:
+    _tidx_real = _real_argv.index('--temp')
+    if _tidx_real + 1 < len(_real_argv):
+        _tidx = sys.argv.index('--temp')
+        sys.argv[_tidx + 1] = _real_argv[_tidx_real + 1]
 
 # Command-line arguments
 parser = argparse.ArgumentParser(description="Federated Learning with Slotted ALOHA and CIFAR-10 Dataset")
@@ -59,6 +119,20 @@ parser.add_argument('--adam', type=int, default=0, help='Whether to use FedAdam 
 parser.add_argument('--temp', type=float, default=0.3, help='Temperature parameter [0,1] for how contribution is user selection (higher temp -> more uniform)')
 
 args = parser.parse_args()
+
+# ---------------------------------------------------------------------------
+# Gamma-alignment logging setup (synchronized with plotGraphs2.py)
+# ---------------------------------------------------------------------------
+_DELTA, _K, _UPG = 0.15, 1, 50
+_user_params_gamma = (
+    [(0.5 - _DELTA, 0.5 + _DELTA)] * _UPG   # group 1: low availability
+    + [(0.5 + _DELTA, 0.5 - _DELTA)] * _UPG  # group 2: high availability
+)
+P_UNIF_NP, P_EFF_NP = _compute_policies(_user_params_gamma, K=_K)
+
+LOG_EVERY = 100
+GAMMA_LOG_PATH = f"gamma_log_temp_{args.temp}.csv"
+# ---------------------------------------------------------------------------
 
 # Parsed arguments
 learning_rate_client = args.learning_rate_client
@@ -173,7 +247,17 @@ for run in range(num_runs):
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------
             # Run the FL mode and get updated weights
             new_weights = fl_system.run(run, seed_index, timeframe)
-    
+
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------
+            # Gamma-alignment logging (full-batch gradients at current w_global)
+            if timeframe % LOG_EVERY == 0:
+                fl_system.log_gamma_step(
+                    timeframe,
+                    lam=args.temp,
+                    p_unif_np=P_UNIF_NP,
+                    p_eff_np=P_EFF_NP,
+                    log_path=GAMMA_LOG_PATH,
+                )
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------
             if (timeframe%(max(num_users//5,1)) == 0): 
                 # Updating the global model with the new aggregated weights 

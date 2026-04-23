@@ -1,3 +1,5 @@
+import csv
+import os
 import random
 import numpy as np
 import torch
@@ -81,6 +83,63 @@ class FederatedLearning:
 
             self.adamMomentum = [torch.zeros_like(param).to(self.device) for param in self.w_global]
             self.adamVariance = [torch.full_like(param, self.tau**2).to(self.device) for param in self.w_global]
+
+    def log_gamma_step(self, timeframe, lam, p_unif_np, p_eff_np, log_path="gamma_log.csv"):
+        """Append one (timeframe, lam, inner_unif, inner_eff, grad_f_sq) row to the CSV.
+
+        Measures the gradient-alignment ratio from Assumption 5 at the current
+        w_global using a true full-batch forward/backward per user.  Read-only:
+        no optimizer step, no weight update, no BN running-stat update.
+        """
+        self.model.eval()
+
+        # Sync model weights to current global weights
+        with torch.no_grad():
+            for param, saved in zip(self.model.parameters(), self.w_global):
+                param.copy_(saved)
+
+        # Compute each user's full-batch gradient at w_global
+        user_grads = []
+        for user_id in range(self.num_users):
+            self.optimizer.zero_grad(set_to_none=True)
+            total_loss = torch.tensor(0.0, device=self.device)
+            total_samples = 0
+            for image, label in self.TrainSetUsers[user_id]:
+                image, label = image.to(self.device), label.to(self.device)
+                out = self.model(image)
+                loss = self.criteron(out, label) * image.size(0)
+                total_loss = total_loss + loss
+                total_samples += image.size(0)
+            (total_loss / max(total_samples, 1)).backward()
+            flat = torch.cat([
+                p.grad.detach().view(-1) if p.grad is not None
+                else torch.zeros(p.numel(), device=self.device)
+                for p in self.model.parameters()
+            ]).cpu()
+            user_grads.append(flat)
+
+        user_grads = torch.stack(user_grads)  # [U, D]
+        dtype = user_grads.dtype
+        p_unif_t = torch.as_tensor(p_unif_np, dtype=dtype)
+        p_eff_t = torch.as_tensor(p_eff_np, dtype=dtype)
+
+        # Global gradient = uniform average; policy-weighted aggregates
+        grad_f = user_grads.mean(dim=0)
+        grad_f_sq = float(torch.dot(grad_f, grad_f).item())
+
+        agg_unif = (p_unif_t.unsqueeze(1) * user_grads).sum(dim=0)
+        agg_eff = (p_eff_t.unsqueeze(1) * user_grads).sum(dim=0)
+        inner_unif = float(torch.dot(agg_unif, grad_f).item())
+        inner_eff = float(torch.dot(agg_eff, grad_f).item())
+
+        write_header = not os.path.exists(log_path)
+        with open(log_path, "a", newline="") as f:
+            w = csv.writer(f)
+            if write_header:
+                w.writerow(["timeframe", "lam", "inner_unif", "inner_eff", "grad_f_sq"])
+            w.writerow([timeframe, lam, inner_unif, inner_eff, grad_f_sq])
+
+        self.model.train()
 
     def lp_cosine_similarity(self, x: torch.Tensor, y: torch.Tensor, p: int = 2) -> float:
         """
